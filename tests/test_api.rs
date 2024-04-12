@@ -11,7 +11,7 @@ use std::ffi::CStr;
 use std::hash::Hash;
 use std::mem::MaybeUninit;
 use std::os::raw::c_char;
-use std::ptr::{addr_of, NonNull};
+use std::ptr::{addr_of, addr_of_mut, NonNull};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -4651,6 +4651,17 @@ fn allow_atomics_wait() {
   }
 }
 
+#[test]
+fn date_time_configuration_change_notification() {
+  let _setup_guard = setup::parallel_test();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate
+    .date_time_configuration_change_notification(v8::TimeZoneDetection::Skip);
+  isolate.date_time_configuration_change_notification(
+    v8::TimeZoneDetection::Redetect,
+  );
+}
+
 fn mock_script_origin<'s>(
   scope: &mut v8::HandleScope<'s>,
   resource_name_: &str,
@@ -8381,7 +8392,7 @@ fn clear_kept_objects() {
 #[test]
 fn wasm_streaming_callback() {
   thread_local! {
-    static WS: RefCell<Option<v8::WasmStreaming>> = RefCell::new(None);
+    static WS: RefCell<Option<v8::WasmStreaming>> = const { RefCell::new(None) };
   }
 
   let callback = |scope: &mut v8::HandleScope,
@@ -8593,7 +8604,7 @@ fn oom_callback() {
 #[test]
 fn prepare_stack_trace_callback() {
   thread_local! {
-    static SITES: RefCell<Option<v8::Global<v8::Array>>> = RefCell::new(None);
+    static SITES: RefCell<Option<v8::Global<v8::Array>>> = const { RefCell::new(None) };
   }
 
   let script = r#"
@@ -8692,7 +8703,9 @@ fn icu_date() {
 
 #[test]
 fn icu_set_common_data_fail() {
-  assert!(v8::icu::set_common_data_73(&[1, 2, 3]).is_err());
+  assert!(
+    v8::icu::set_common_data_73(&[1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0]).is_err()
+  );
 }
 
 #[test]
@@ -10578,7 +10591,7 @@ fn test_fast_calls_callback_options_data() {
 
   let global = context.global(scope);
   let external =
-    v8::External::new(scope, unsafe { &mut DATA as *mut bool as *mut c_void });
+    v8::External::new(scope, unsafe { addr_of_mut!(DATA) as *mut c_void });
 
   let template = v8::FunctionTemplate::builder(slow_fn)
     .data(external.into())

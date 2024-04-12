@@ -54,6 +54,7 @@ use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::ptr;
+use std::ptr::addr_of_mut;
 use std::ptr::drop_in_place;
 use std::ptr::null_mut;
 use std::ptr::NonNull;
@@ -83,6 +84,24 @@ pub enum MemoryPressureLevel {
   None = 0,
   Moderate = 1,
   Critical = 2,
+}
+
+/// Time zone redetection indicator for
+/// DateTimeConfigurationChangeNotification.
+///
+/// kSkip indicates V8 that the notification should not trigger redetecting
+/// host time zone. kRedetect indicates V8 that host time zone should be
+/// redetected, and used to set the default time zone.
+///
+/// The host time zone detection may require file system access or similar
+/// operations unlikely to be available inside a sandbox. If v8 is run inside a
+/// sandbox, the host time zone has to be detected outside the sandbox before
+/// calling DateTimeConfigurationChangeNotification function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub enum TimeZoneDetection {
+  Skip = 0,
+  Redetect = 1,
 }
 
 /// PromiseHook with type Init is called when a new promise is
@@ -501,6 +520,10 @@ extern "C" {
     isolate: *mut Isolate,
     callback: extern "C" fn(*const FunctionCallbackInfo),
   );
+  fn v8__Isolate__DateTimeConfigurationChangeNotification(
+    isolate: *mut Isolate,
+    time_zone_detection: TimeZoneDetection,
+  );
   fn v8__Isolate__HasPendingBackgroundTasks(isolate: *const Isolate) -> bool;
   fn v8__Isolate__RequestGarbageCollectionForTesting(
     isolate: *mut Isolate,
@@ -509,7 +532,7 @@ extern "C" {
 
   fn v8__HeapProfiler__TakeHeapSnapshot(
     isolate: *mut Isolate,
-    callback: extern "C" fn(*mut c_void, *const u8, usize) -> bool,
+    callback: unsafe extern "C" fn(*mut c_void, *const u8, usize) -> bool,
     arg: *mut c_void,
   );
 
@@ -1199,6 +1222,27 @@ impl Isolate {
     unsafe { v8__Isolate__SetWasmStreamingCallback(self, trampoline::<F>()) }
   }
 
+  /// Notification that the embedder has changed the time zone, daylight savings
+  /// time or other date / time configuration parameters. V8 keeps a cache of
+  /// various values used for date / time computation. This notification will
+  /// reset those cached values for the current context so that date / time
+  /// configuration changes would be reflected.
+  ///
+  /// This API should not be called more than needed as it will negatively impact
+  /// the performance of date operations.
+  #[inline(always)]
+  pub fn date_time_configuration_change_notification(
+    &mut self,
+    time_zone_detection: TimeZoneDetection,
+  ) {
+    unsafe {
+      v8__Isolate__DateTimeConfigurationChangeNotification(
+        self,
+        time_zone_detection,
+      )
+    }
+  }
+
   /// Returns true if there is ongoing background work within V8 that will
   /// eventually post a foreground task, like asynchronous WebAssembly
   /// compilation.
@@ -1279,7 +1323,7 @@ impl Isolate {
   where
     F: FnMut(&[u8]) -> bool,
   {
-    extern "C" fn trampoline<F>(
+    unsafe extern "C" fn trampoline<F>(
       arg: *mut c_void,
       data: *const u8,
       size: usize,
@@ -1287,14 +1331,18 @@ impl Isolate {
     where
       F: FnMut(&[u8]) -> bool,
     {
-      let p = arg as *mut F;
-      let callback = unsafe { &mut *p };
-      let slice = unsafe { std::slice::from_raw_parts(data, size) };
-      callback(slice)
+      let mut callback = NonNull::<F>::new_unchecked(arg as _);
+      if size > 0 {
+        (callback.as_mut())(std::slice::from_raw_parts(data, size))
+      } else {
+        (callback.as_mut())(&[])
+      }
     }
 
-    let arg = &mut callback as *mut F as *mut c_void;
-    unsafe { v8__HeapProfiler__TakeHeapSnapshot(self, trampoline::<F>, arg) }
+    let arg = addr_of_mut!(callback);
+    unsafe {
+      v8__HeapProfiler__TakeHeapSnapshot(self, trampoline::<F>, arg as _)
+    }
   }
 
   /// Set the default context to be included in the snapshot blob.
